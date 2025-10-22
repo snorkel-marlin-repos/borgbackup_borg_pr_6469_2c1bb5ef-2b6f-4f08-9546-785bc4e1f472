@@ -16,7 +16,7 @@ import sys
 import tempfile
 import time
 import unittest
-from binascii import unhexlify, b2a_base64
+from binascii import unhexlify, b2a_base64, a2b_base64
 from configparser import ConfigParser
 from datetime import datetime
 from datetime import timezone
@@ -57,6 +57,7 @@ from . import has_lchflags, llfuse
 from . import BaseTestCase, changedir, environment_variable, no_selinux
 from . import are_symlinks_supported, are_hardlinks_supported, are_fifos_supported, is_utime_fully_supported, is_birthtime_fully_supported
 from .platform import fakeroot_detected
+from .upgrader import make_attic_repo
 from . import key
 
 
@@ -3409,7 +3410,7 @@ id: 2 / e29442 3506da 4e1ea7 / 25f62a 5a3d41 - 02
         os.unlink('input/flagfile')
         self.cmd('init', '--encryption=repokey', self.repository_location)
         self.cmd('create', self.repository_location + '::test', 'input')
-        self.cmd('export-tar', self.repository_location + '::test', 'simple.tar', '--progress', '--tar-format=GNU')
+        self.cmd('export-tar', self.repository_location + '::test', 'simple.tar', '--progress')
         with changedir('output'):
             # This probably assumes GNU tar. Note -p switch to extract permissions regardless of umask.
             subprocess.check_call(['tar', 'xpf', '../simple.tar', '--warning=no-timestamp'])
@@ -3424,8 +3425,7 @@ id: 2 / e29442 3506da 4e1ea7 / 25f62a 5a3d41 - 02
         os.unlink('input/flagfile')
         self.cmd('init', '--encryption=repokey', self.repository_location)
         self.cmd('create', self.repository_location + '::test', 'input')
-        list = self.cmd('export-tar', self.repository_location + '::test', 'simple.tar.gz',
-                        '--list', '--tar-format=GNU')
+        list = self.cmd('export-tar', self.repository_location + '::test', 'simple.tar.gz', '--list')
         assert 'input/file1\n' in list
         assert 'input/dir2\n' in list
         with changedir('output'):
@@ -3440,8 +3440,7 @@ id: 2 / e29442 3506da 4e1ea7 / 25f62a 5a3d41 - 02
         os.unlink('input/flagfile')
         self.cmd('init', '--encryption=repokey', self.repository_location)
         self.cmd('create', self.repository_location + '::test', 'input')
-        list = self.cmd('export-tar', self.repository_location + '::test', 'simple.tar',
-                        '--strip-components=1', '--list', '--tar-format=GNU')
+        list = self.cmd('export-tar', self.repository_location + '::test', 'simple.tar', '--strip-components=1', '--list')
         # --list's path are those before processing with --strip-components
         assert 'input/file1\n' in list
         assert 'input/dir2\n' in list
@@ -3453,8 +3452,7 @@ id: 2 / e29442 3506da 4e1ea7 / 25f62a 5a3d41 - 02
     @requires_gnutar
     def test_export_tar_strip_components_links(self):
         self._extract_hardlinks_setup()
-        self.cmd('export-tar', self.repository_location + '::test', 'output.tar',
-                 '--strip-components=2', '--tar-format=GNU')
+        self.cmd('export-tar', self.repository_location + '::test', 'output.tar', '--strip-components=2')
         with changedir('output'):
             subprocess.check_call(['tar', 'xpf', '../output.tar', '--warning=no-timestamp'])
             assert os.stat('hardlink').st_nlink == 2
@@ -3466,7 +3464,7 @@ id: 2 / e29442 3506da 4e1ea7 / 25f62a 5a3d41 - 02
     @requires_gnutar
     def test_extract_hardlinks_tar(self):
         self._extract_hardlinks_setup()
-        self.cmd('export-tar', self.repository_location + '::test', 'output.tar', 'input/dir1', '--tar-format=GNU')
+        self.cmd('export-tar', self.repository_location + '::test', 'output.tar', 'input/dir1')
         with changedir('output'):
             subprocess.check_call(['tar', 'xpf', '../output.tar', '--warning=no-timestamp'])
             assert os.stat('input/dir1/hardlink').st_nlink == 2
@@ -3474,30 +3472,50 @@ id: 2 / e29442 3506da 4e1ea7 / 25f62a 5a3d41 - 02
             assert os.stat('input/dir1/aaaa').st_nlink == 2
             assert os.stat('input/dir1/source2').st_nlink == 2
 
-    def test_import_tar(self, tar_format='PAX'):
+    def test_import_tar(self):
         self.create_test_files()
         os.unlink('input/flagfile')
         self.cmd('init', '--encryption=none', self.repository_location)
         self.cmd('create', self.repository_location + '::src', 'input')
-        self.cmd('export-tar', self.repository_location + '::src', 'simple.tar', f'--tar-format={tar_format}')
+        self.cmd('export-tar', self.repository_location + '::src', 'simple.tar')
         self.cmd('import-tar', self.repository_location + '::dst', 'simple.tar')
         with changedir(self.output_path):
             self.cmd('extract', self.repository_location + '::dst')
         self.assert_dirs_equal('input', 'output/input', ignore_ns=True, ignore_xattrs=True)
 
     @requires_gzip
-    def test_import_tar_gz(self, tar_format='GNU'):
+    def test_import_tar_gz(self):
         if not shutil.which('gzip'):
             pytest.skip('gzip is not installed')
         self.create_test_files()
         os.unlink('input/flagfile')
         self.cmd('init', '--encryption=none', self.repository_location)
         self.cmd('create', self.repository_location + '::src', 'input')
-        self.cmd('export-tar', self.repository_location + '::src', 'simple.tgz', f'--tar-format={tar_format}')
+        self.cmd('export-tar', self.repository_location + '::src', 'simple.tgz')
         self.cmd('import-tar', self.repository_location + '::dst', 'simple.tgz')
         with changedir(self.output_path):
             self.cmd('extract', self.repository_location + '::dst')
         self.assert_dirs_equal('input', 'output/input', ignore_ns=True, ignore_xattrs=True)
+
+    def test_detect_attic_repo(self):
+        path = make_attic_repo(self.repository_path)
+        cmds = [
+            ['create', path + '::test', self.tmpdir],
+            ['extract', path + '::test'],
+            ['check', path],
+            ['rename', path + '::test', 'newname'],
+            ['list', path],
+            ['delete', path],
+            ['prune', path],
+            ['info', path + '::test'],
+            ['key', 'export', path, 'exported'],
+            ['key', 'import', path, 'import'],
+            ['key', 'change-passphrase', path],
+            ['break-lock', path],
+        ]
+        for args in cmds:
+            output = self.cmd(*args, fork=True, exit_code=2)
+            assert 'Attic repository detected.' in output
 
     # derived from test_extract_xattrs_errors()
     @pytest.mark.skipif(not xattr.XATTR_FAKEROOT, reason='xattr not supported on this system or on this version of'
@@ -3584,6 +3602,51 @@ id: 2 / e29442 3506da 4e1ea7 / 25f62a 5a3d41 - 02
 
         self.cmd('create', self.repository_location + '::test2', 'input')
         assert os.path.exists(nonce)
+
+    def test_init_defaults_to_argon2(self):
+        """https://github.com/borgbackup/borg/issues/747#issuecomment-1076160401"""
+        self.cmd('init', '--encryption=repokey', self.repository_location)
+        with Repository(self.repository_path) as repository:
+            key = msgpack.unpackb(a2b_base64(repository.load_key()))
+        assert key[b'algorithm'] == b'argon2 aes256-ctr hmac-sha256'
+
+    def test_init_with_explicit_key_algorithm(self):
+        """https://github.com/borgbackup/borg/issues/747#issuecomment-1076160401"""
+        self.cmd('init', '--encryption=repokey', '--key-algorithm=pbkdf2', self.repository_location)
+        with Repository(self.repository_path) as repository:
+            key = msgpack.unpackb(a2b_base64(repository.load_key()))
+        assert key[b'algorithm'] == b'sha256'
+
+    def verify_change_passphrase_does_not_change_algorithm(self, given_algorithm, expected_algorithm):
+        self.cmd('init', '--encryption=repokey', '--key-algorithm', given_algorithm, self.repository_location)
+        os.environ['BORG_NEW_PASSPHRASE'] = 'newpassphrase'
+
+        self.cmd('key', 'change-passphrase', self.repository_location)
+
+        with Repository(self.repository_path) as repository:
+            key = msgpack.unpackb(a2b_base64(repository.load_key()))
+            assert key[b'algorithm'] == expected_algorithm
+
+    def test_change_passphrase_does_not_change_algorithm_argon2(self):
+        self.verify_change_passphrase_does_not_change_algorithm('argon2', b'argon2 aes256-ctr hmac-sha256')
+
+    def test_change_passphrase_does_not_change_algorithm_pbkdf2(self):
+        self.verify_change_passphrase_does_not_change_algorithm('pbkdf2', b'sha256')
+
+    def verify_change_location_does_not_change_algorithm(self, given_algorithm, expected_algorithm):
+        self.cmd('init', '--encryption=keyfile', '--key-algorithm', given_algorithm, self.repository_location)
+
+        self.cmd('key', 'change-location', self.repository_location, 'repokey')
+
+        with Repository(self.repository_path) as repository:
+            key = msgpack.unpackb(a2b_base64(repository.load_key()))
+            assert key[b'algorithm'] == expected_algorithm
+
+    def test_change_location_does_not_change_algorithm_argon2(self):
+        self.verify_change_location_does_not_change_algorithm('argon2', b'argon2 aes256-ctr hmac-sha256')
+
+    def test_change_location_does_not_change_algorithm_pbkdf2(self):
+        self.verify_change_location_does_not_change_algorithm('pbkdf2', b'sha256')
 
 
 @unittest.skipUnless('binary' in BORG_EXES, 'no borg.exe available')
